@@ -1,0 +1,13 @@
+todos os processos estão parados, quando sinalizar ele finge de morto
+
+maquina de estados esta sempre esperando o próximo movimento
+
+dois problemas implementados, implementar outros do enunciado
+
+p0 define quem falhou e quem detectou a falha
+
+
+diferentes cases
+    - fingir de morto
+    - voltar
+    
