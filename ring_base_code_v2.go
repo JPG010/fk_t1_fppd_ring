@@ -6,22 +6,26 @@ package main
 import (
 	"fmt"
 	"sync"
+	"time"
 )
 
 type mensagem struct {
-	tipo  int    // tipo da mensagem para fazer o controle do que fazer (eleição, confirmacao da eleicao)
-	corpo [3]int // conteudo da mensagem para colocar os ids (usar um tamanho ocmpativel com o numero de processos no anel)
+	tipo  int    // 1: eleição, 2: falha, 3: recuperação, 4: novo líder, 5: fim
+	corpo [3]int // [id_origem, id_atual, id_lider]
 }
 
 var (
-	chans = []chan mensagem{ // vetor de canias para formar o anel de eleicao - chan[0], chan[1] and chan[2] ...
-		make(chan mensagem),
-		make(chan mensagem),
-		make(chan mensagem),
-		make(chan mensagem),
+	chans = []chan mensagem{
+		make(chan mensagem, 1), // P0 (controlador)
+		make(chan mensagem, 1), // P1
+		make(chan mensagem, 1), // P2
+		make(chan mensagem, 1), // P3
+		make(chan mensagem, 1), // P4
+		make(chan mensagem, 1), // P5
 	}
-	controle = make(chan int)
-	wg       sync.WaitGroup // wg is used to wait for the program to finish
+	controle = make(chan int, 1)
+	wg       sync.WaitGroup
+	done     = make(chan bool)
 )
 
 func ElectionControler(in chan int) {
@@ -29,88 +33,174 @@ func ElectionControler(in chan int) {
 
 	var temp mensagem
 
-	// comandos para o anel iciam aqui
-
-	// mudar o processo 0 - canal de entrada 3 - para falho (defini mensagem tipo 2 pra isto)
-
+	// 1. Falha em P5 e eleição
+	fmt.Println("\n=== 1. Falha em P5 e eleição ===")
 	temp.tipo = 2
-	chans[3] <- temp
-	fmt.Printf("Controle: mudar o processo 0 para falho\n")
+	chans[5] <- temp
+	fmt.Printf("P0: P5 falhou\n")
+	<-in
 
-	fmt.Printf("Controle: confirmação %d\n", <-in) // receber e imprimir confirmação
-
-	// mudar o processo 1 - canal de entrada 0 - para falho (defini mensagem tipo 2 pra isto)
-
-	temp.tipo = 2
-	chans[0] <- temp
-	fmt.Printf("Controle: mudar o processo 1 para falho\n")
-	fmt.Printf("Controle: confirmação %d\n", <-in) // receber e imprimir confirmação
-
-	// matar os outrs processos com mensagens não conhecidas (só pra cosumir a leitura)
-
-	temp.tipo = 4
-	chans[1] <- temp
+	temp.tipo = 1
+	temp.corpo = [3]int{2, 2, 0}
 	chans[2] <- temp
+	fmt.Printf("P0: P2 inicia eleição\n")
+	time.Sleep(2 * time.Second)
 
+	// 2. Falha em P4 e eleição
+	fmt.Println("\n=== 2. Falha em P4 e eleição ===")
+	temp.tipo = 2
+	chans[4] <- temp
+	fmt.Printf("P0: P4 falhou\n")
+	<-in
+
+	temp.tipo = 1
+	temp.corpo = [3]int{3, 3, 0}
+	chans[3] <- temp
+	fmt.Printf("P0: P3 inicia eleição\n")
+	time.Sleep(2 * time.Second)
+
+	// 3. Recuperação de P4 e eleição
+	fmt.Println("\n=== 3. Recuperação de P4 e eleição ===")
+	temp.tipo = 3
+	chans[4] <- temp
+	fmt.Printf("P0: P4 recuperado\n")
+	<-in
+
+	temp.tipo = 1
+	temp.corpo = [3]int{4, 4, 0}
+	chans[4] <- temp
+	fmt.Printf("P0: P4 inicia eleição\n")
+	time.Sleep(2 * time.Second)
+
+	// 4. Recuperação de P5 e eleição
+	fmt.Println("\n=== 4. Recuperação de P5 e eleição ===")
+	temp.tipo = 3
+	chans[5] <- temp
+	fmt.Printf("P0: P5 recuperado\n")
+	<-in
+
+	temp.tipo = 1
+	temp.corpo = [3]int{5, 5, 0}
+	chans[5] <- temp
+	fmt.Printf("P0: P5 inicia eleição\n")
+	time.Sleep(2 * time.Second)
+
+	// Finaliza todos os processos
+	fmt.Println("\n=== Finalizando processos ===")
+	temp.tipo = 5
+	for i := 1; i < 6; i++ {
+		select {
+		case chans[i] <- temp:
+			fmt.Printf("P0: enviando mensagem de fim para P%d\n", i)
+		case <-time.After(100 * time.Millisecond):
+			fmt.Printf("P0: timeout ao enviar mensagem de fim para P%d\n", i)
+		}
+	}
+	close(done)
 	fmt.Println("\n   Processo controlador concluído\n")
 }
 
 func ElectionStage(TaskId int, in chan mensagem, out chan mensagem, leader int) {
 	defer wg.Done()
 
-	// variaveis locais que indicam se este processo é o lider e se esta ativo
+	var actualLeader int = leader
+	var bFailed bool = false
 
-	var actualLeader int
-	var bFailed bool = false // todos inciam sem falha
+	for {
+		select {
+		case temp := <-in:
+			fmt.Printf("P%d: recebi mensagem %d, [ %d, %d, %d ]\n", TaskId, temp.tipo, temp.corpo[0], temp.corpo[1], temp.corpo[2])
 
-	actualLeader = leader // indicação do lider veio por parâmatro
+			if temp.tipo == 5 {
+				fmt.Printf("P%d: finalizando processo\n", TaskId)
+				return
+			}
 
-	temp := <-in // ler mensagem
-	fmt.Printf("%2d: recebi mensagem %d, [ %d, %d, %d ]\n", TaskId, temp.tipo, temp.corpo[0], temp.corpo[1], temp.corpo[2])
+			if bFailed {
+				select {
+				case controle <- -5:
+				case <-time.After(100 * time.Millisecond):
+				}
+				continue
+			}
 
-	switch temp.tipo {
-	case 2:
-		{
-			bFailed = true
-			fmt.Printf("%2d: falho %v \n", TaskId, bFailed)
-			fmt.Printf("%2d: lider atual %d\n", TaskId, actualLeader)
-			controle <- -5
-		}
-	case 3:
-		{
-			bFailed = false
-			fmt.Printf("%2d: falho %v \n", TaskId, bFailed)
-			fmt.Printf("%2d: lider atual %d\n", TaskId, actualLeader)
-			controle <- -5
-		}
-	default:
-		{
-			fmt.Printf("%2d: não conheço este tipo de mensagem\n", TaskId)
-			fmt.Printf("%2d: lider atual %d\n", TaskId, actualLeader)
+			switch temp.tipo {
+			case 1: // Mensagem de eleição
+				if temp.corpo[0] == TaskId {
+					actualLeader = temp.corpo[1]
+					newMsg := mensagem{tipo: 4, corpo: [3]int{TaskId, actualLeader, actualLeader}}
+					select {
+					case out <- newMsg:
+						fmt.Printf("P%d: novo líder eleito: P%d\n", TaskId, actualLeader)
+					case <-time.After(100 * time.Millisecond):
+						fmt.Printf("P%d: não foi possível anunciar novo líder\n", TaskId)
+					}
+					fmt.Printf("P%d: LÍDER ELEITO NA RODADA: P%d\n", TaskId, actualLeader)
+				} else {
+					if TaskId > temp.corpo[1] {
+						temp.corpo[1] = TaskId
+					}
+					select {
+					case out <- temp:
+						fmt.Printf("P%d: passando mensagem de eleição\n", TaskId)
+					case <-time.After(100 * time.Millisecond):
+						fmt.Printf("P%d: não foi possível passar mensagem de eleição\n", TaskId)
+					}
+				}
+
+			case 2: // Falha
+				bFailed = true
+				fmt.Printf("P%d: falho %v\n", TaskId, bFailed)
+				select {
+				case controle <- -5:
+				case <-time.After(100 * time.Millisecond):
+				}
+
+			case 3: // Recuperação
+				bFailed = false
+				fmt.Printf("P%d: recuperado\n", TaskId)
+				select {
+				case controle <- -5:
+				case <-time.After(100 * time.Millisecond):
+				}
+
+			case 4: // Novo líder
+				actualLeader = temp.corpo[2]
+				fmt.Printf("P%d: novo líder é P%d\n", TaskId, actualLeader)
+				if !bFailed {
+					select {
+					case out <- temp:
+						fmt.Printf("P%d: propagando novo líder\n", TaskId)
+					case <-time.After(100 * time.Millisecond):
+						fmt.Printf("P%d: não foi possível propagar novo líder\n", TaskId)
+					}
+				}
+			}
+
+			fmt.Printf("P%d: líder atual P%d\n", TaskId, actualLeader)
+
+		case <-time.After(1 * time.Second):
+			select {
+			case <-done:
+				fmt.Printf("P%d: finalizando processo por sinal de término\n", TaskId)
+				return
+			default:
+			}
 		}
 	}
-
-	fmt.Printf("%2d: terminei \n", TaskId)
 }
 
 func main() {
+	wg.Add(6) // 5 processos + 1 controlador
 
-	wg.Add(5) // Add a count of four, one for each goroutine
-
-	// criar os processo do anel de eleicao
-
-	go ElectionStage(0, chans[3], chans[0], 0) // este é o lider
-	go ElectionStage(1, chans[0], chans[1], 0) // não é lider, é o processo 0
-	go ElectionStage(2, chans[1], chans[2], 0) // não é lider, é o processo 0
-	go ElectionStage(3, chans[2], chans[3], 0) // não é lider, é o processo 0
+	go ElectionStage(1, chans[5], chans[1], 0) // P1
+	go ElectionStage(2, chans[1], chans[2], 0) // P2
+	go ElectionStage(3, chans[2], chans[3], 0) // P3
+	go ElectionStage(4, chans[3], chans[4], 0) // P4
+	go ElectionStage(5, chans[4], chans[5], 0) // P5
 
 	fmt.Println("\n   Anel de processos criado")
-
-	// criar o processo controlador
-
 	go ElectionControler(controle)
-
 	fmt.Println("\n   Processo controlador criado\n")
-
-	wg.Wait() // Wait for the goroutines to finish\
+	wg.Wait()
 }
